@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "learningpulse"
+version = "0.1.0"
+description = "Synthetic near-real-time learning and assessment analytics platform for a Principal Data Engineer / Data Architect portfolio project."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "LearningPulse" }
+]
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]

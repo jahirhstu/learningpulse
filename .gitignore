@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Generated data (keep folder placeholders)
+data/raw/*
+!data/raw/.gitkeep
+data/quarantine/*
+!data/quarantine/.gitkeep
+
+# Build artifacts
+build/
+dist/
+
+# Terraform local/state artifacts
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# Logs / runtime output
+*.log
+logs/
