@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://learningpulse.local/contracts/assessment_event_v1.json",
+  "title": "LearningPulse Assessment Event v1",
+  "description": "Contract for a synthetic learner assessment event.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "learner_id",
+    "assessment_id",
+    "subject",
+    "score",
+    "max_score",
+    "event_type",
+    "occurred_at",
+    "ingested_at"
+  ],
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "learner_id": { "type": "string", "format": "uuid" },
+    "assessment_id": { "type": "string", "format": "uuid" },
+    "subject": {
+      "type": "string",
+      "enum": ["mathematics", "science", "english", "history", "computer_science"]
+    },
+    "score": { "type": "integer", "minimum": 0 },
+    "max_score": { "type": "integer", "minimum": 1 },
+    "event_type": {
+      "type": "string",
+      "enum": ["assessment_completed"]
+    },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "ingested_at": { "type": "string", "format": "date-time" }
+  }
+}

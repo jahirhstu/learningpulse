@@ -48,14 +48,104 @@ learningpulse/
 2. **Local-first and low-cost** — implementations should run locally wherever practical; paid cloud resources are optional and must not be required to understand the architecture.
 3. **Reproducible setup** — another engineer should be able to understand the repository structure, environment assumptions, and execution steps from the documentation.
 
-## Current milestone — Project Scaffold
+## Current milestone — Validated generator, configuration, and quarantine
 
-This first milestone intentionally contains only the project foundation. Kafka, Spark, Iceberg, pipelines, and infrastructure implementation are **not** part of this milestone.
+The project includes a versioned JSON Schema contract, a typed Python generator,
+record validation, external configuration, and structured failure logging.
+Kafka and Spark remain outside this milestone.
+
+### Generate the data
+
+From the repository root, run:
+
+```bash
+python -m learningpulse.generator --count 1000 --seed 42
+```
+
+When the package is not installed, set the source path explicitly:
+
+```bash
+PYTHONPATH=src python -m learningpulse.generator --count 1000 --seed 42
+```
+
+The generator writes newline-delimited JSON to
+`data/raw/assessment_events/date=YYYY-MM-DD/events.jsonl`. Use `--output` to
+choose another location. Supplying `--seed` makes generated identifiers,
+subjects, scores, and relative event timing reproducible; timestamps are anchored
+to the time the command starts.
+
+### Configuration and validation
+
+Run commands from the repository root. Relative output paths are resolved against
+the current working directory. Configuration lives in `src/learningpulse/config.py`;
+explicit CLI options override environment values, which override defaults.
+
+| CLI option | Environment variable | Default |
+| --- | --- | --- |
+| `--count` / `--record-count` | `LEARNINGPULSE_RECORD_COUNT` | `1000` |
+| `--output` | `LEARNINGPULSE_OUTPUT_PATH` | Date-partitioned path above |
+| `--quarantine` | `LEARNINGPULSE_QUARANTINE_PATH` | `data/quarantine/invalid_events.jsonl` |
+| `--seed` | `LEARNINGPULSE_SEED` | Unseeded |
+
+For example:
+
+```bash
+LEARNINGPULSE_RECORD_COUNT=1000 LEARNINGPULSE_OUTPUT_PATH=data/raw/example.jsonl \
+  PYTHONPATH=src python -m learningpulse.generator --seed 42
+```
+
+`validation.py` checks required UUID IDs, timezone-aware ISO 8601 timestamps,
+ingestion not preceding completion, the assessment event type, allowed subjects,
+integer scores, `score >= 0`, `max_score > 0`, and `score <= max_score`.
+It returns all rejection reasons instead of raising for invalid field values.
+
+`write_jsonl()` validates each event before writing. Valid output is replaced on
+each run. Invalid records are appended to quarantine as JSON objects containing
+`record`, `status`, and `reasons`; processing continues with the next event.
+JSON logs go to stderr and include `event_id`, `status`, and `reason`. A final
+summary includes `accepted`, `rejected`, and `total` for the current batch.
+The quarantine file can contain rejected records from multiple runs.
+
+Invalid configuration stops before generation. Filesystem errors are logged and
+produce exit code 1, since the run cannot safely continue without writable output.
+Batch output is not transactional: a filesystem failure can leave partial files.
+
+### Verify valid and invalid records
+
+```bash
+PYTHONPATH=src python -m unittest discover -s tests -v
+```
+
+The mixed-batch test generates six events and deliberately corrupts three:
+a negative score, a missing learner ID, and an invalid timestamp. It verifies
+three accepted records, three quarantined records with reasons, structured
+failure logs, and continued processing after rejection. Other checks cover 1,000
+valid generated records, boundary scores, malformed fields, and configuration precedence.
+
+### Assessment event v1 fields
+
+The machine-readable contract is
+[`contracts/assessment_event_v1.json`](contracts/assessment_event_v1.json).
+
+| Field | Meaning |
+| --- | --- |
+| `event_id` | UUID uniquely identifying this emitted event. |
+| `learner_id` | Synthetic UUID identifying the learner. |
+| `assessment_id` | Synthetic UUID identifying the assessment. |
+| `subject` | Assessment subject from the contract's allowed values. |
+| `score` | Integer points earned, always from zero through `max_score`. |
+| `max_score` | Maximum points available for the assessment. |
+| `event_type` | Event discriminator; v1 emits `assessment_completed`. |
+| `occurred_at` | Time the learner completed the assessment, as an ISO 8601 timestamp. |
+| `ingested_at` | Time the platform received the event, one to 180 seconds later. |
 
 ### Completion criteria
 
-- Repository structure exists.
-- Problem and scope are documented.
-- Initial architecture direction is documented.
-- Three project constraints are recorded.
-- Initial Git commit is created.
+- Versioned assessment-event contract exists.
+- Generator creates 1,000 valid-looking synthetic records by default.
+- JSONL output is stored in a date-partitioned raw-data folder.
+- Every event field is documented.
+- Invalid records are rejected with reasons and appended to quarantine.
+- Valid records continue processing after rejection.
+- Record count and paths are configurable outside generation logic.
+- Structured logs identify failures and summarize accepted/rejected counts.
