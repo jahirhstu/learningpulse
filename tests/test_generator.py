@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from learningpulse.config import load_config
-from learningpulse.generator import JsonLogFormatter, generate_events, write_jsonl
+from learningpulse.generator import ExistingOutputError, JsonLogFormatter, generate_events, main, write_jsonl
 from learningpulse.validation import validate_record
 
 
@@ -76,6 +76,94 @@ class RoutingTests(unittest.TestCase):
     def test_same_destination_is_rejected(self):
         with self.assertRaises(ValueError):
             write_jsonl([], Path("same.jsonl"), Path("same.jsonl"))
+
+
+class DuplicateTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.output = Path(self.directory.name) / "events.jsonl"
+        self.quarantine = Path(self.directory.name) / "invalid.jsonl"
+        self.records = [asdict(event) for event in generate_events(3, seed=42)]
+
+    def write(self, records):
+        with self.assertLogs("learningpulse.generator", level="INFO") as captured:
+            count = write_jsonl(iter(records), self.output, self.quarantine)
+        logs = [json.loads(JsonLogFormatter().format(record)) for record in captured.records]
+        return count, logs
+
+    def read_output(self):
+        return [json.loads(line) for line in self.output.read_text().splitlines()]
+
+    def test_replaying_same_batch_preserves_output_exactly(self):
+        count, _ = self.write(self.records)
+        self.assertEqual(count, 3)
+        original = self.output.read_bytes()
+        count, logs = self.write(self.records)
+        self.assertEqual(count, 0)
+        self.assertEqual(self.output.read_bytes(), original)
+        self.assertEqual(len({record["event_id"] for record in self.read_output()}), 3)
+        self.assertEqual(self.quarantine.read_text(), "")
+        self.assertEqual([entry["event_id"] for entry in logs[:-1]], [record["event_id"] for record in self.records])
+        self.assertTrue(all(entry["status"] == "duplicate" and entry["reason"] for entry in logs[:-1]))
+        self.assertEqual({key: logs[-1][key] for key in ("accepted", "rejected", "duplicates", "total")},
+                         {"accepted": 0, "rejected": 0, "duplicates": 3, "total": 3})
+
+    def test_duplicates_within_batch_and_overlapping_runs_keep_first(self):
+        first, second, third = self.records
+        changed = {**first, "score": (first["score"] + 1) % (first["max_score"] + 1)}
+        count, logs = self.write([first, changed, second])
+        self.assertEqual((count, logs[-1]["duplicates"]), (2, 1))
+        count, logs = self.write([changed, second, third])
+        self.assertEqual((count, logs[-1]["duplicates"]), (1, 2))
+        self.assertEqual(self.read_output(), self.records)
+
+    def test_invalid_records_do_not_reserve_ids(self):
+        first = self.records[0]
+        invalid = {**first, "score": -1}
+        count, logs = self.write([invalid, first, first, invalid])
+        self.assertEqual(count, 1)
+        self.assertEqual(self.read_output(), [first])
+        self.assertEqual(len(self.quarantine.read_text().splitlines()), 2)
+        self.assertEqual((logs[-1]["accepted"], logs[-1]["rejected"], logs[-1]["duplicates"], logs[-1]["total"]), (1, 2, 1, 4))
+
+    def test_bad_existing_output_does_not_modify_either_file(self):
+        valid_line = json.dumps(self.records[0]) + "\n"
+        cases = [b"not-json\n", b"[]\n", b"{}\n", b"\xff", b"\n",
+                 (valid_line * 2).encode(), (valid_line + "broken\n").encode()]
+        for contents in cases:
+            with self.subTest(contents=contents):
+                self.output.write_bytes(contents)
+                self.quarantine.write_text("existing quarantine\n")
+                with self.assertRaises(ExistingOutputError):
+                    write_jsonl(self.records, self.output, self.quarantine)
+                self.assertEqual(self.output.read_bytes(), contents)
+                self.assertEqual(self.quarantine.read_text(), "existing quarantine\n")
+
+    def test_cli_logs_corrupt_output_failure(self):
+        self.output.write_text("broken\n")
+        with self.assertLogs("learningpulse.generator", level="ERROR") as captured:
+            result = main(["--count", "1", "--output", str(self.output), "--quarantine", str(self.quarantine)])
+        self.assertEqual(result, 1)
+        entry = json.loads(JsonLogFormatter().format(captured.records[0]))
+        self.assertEqual(entry["status"], "failed")
+        self.assertIn("line 1", entry["reason"])
+        self.assertFalse(self.quarantine.exists())
+
+    def test_existing_last_line_without_newline(self):
+        original = json.dumps(self.records[0]).encode()
+        self.output.write_bytes(original)
+        self.write([self.records[0]])
+        self.assertEqual(self.output.read_bytes(), original)
+        self.write(self.records[1:])
+        self.assertEqual(self.read_output(), self.records)
+
+    def test_empty_batch_preserves_accepted_output(self):
+        self.write(self.records)
+        original = self.output.read_bytes()
+        count, logs = self.write([])
+        self.assertEqual((count, logs[-1]["total"]), (0, 0))
+        self.assertEqual(self.output.read_bytes(), original)
 
 
 class ConfigTests(unittest.TestCase):

@@ -95,10 +95,48 @@ class JsonLogFormatter(logging.Formatter):
             "status": getattr(record, "status", None),
             "reason": getattr(record, "reason", None),
         }
-        for field in ("accepted", "rejected", "total"):
+        for field in ("accepted", "rejected", "duplicates", "total"):
             if hasattr(record, field):
                 payload[field] = getattr(record, field)
         return json.dumps(payload)
+
+
+class ExistingOutputError(ValueError):
+    """Accepted output is unsafe to append to without manual repair."""
+
+
+def _read_accepted_ids(output_path: Path) -> tuple[set[str], bool]:
+    """Validate existing output before writes; retain IDs and newline state only."""
+    seen: set[str] = set()
+    needs_newline = False
+    try:
+        output_file = output_path.open(encoding="utf-8")
+    except FileNotFoundError:
+        return seen, needs_newline
+    try:
+        with output_file:
+            for line_number, line in enumerate(output_file, start=1):
+                try:
+                    record = json.loads(line)
+                except ValueError as error:
+                    raise ExistingOutputError(
+                        f"{output_path}: line {line_number}: invalid JSON"
+                    ) from error
+                reasons = validate_record(record) if isinstance(record, dict) else ["expected a JSON object"]
+                if reasons:
+                    raise ExistingOutputError(
+                        f"{output_path}: line {line_number}: {'; '.join(reasons)}"
+                    )
+                event_id = record["event_id"]
+                if event_id in seen:
+                    raise ExistingOutputError(
+                        f"{output_path}: line {line_number}: duplicate event_id {event_id}"
+                    )
+                seen.add(event_id)
+                needs_newline = not line.endswith("\n")
+    except UnicodeError as error:
+        raise ExistingOutputError(f"{output_path}: invalid UTF-8") from error
+    return seen, needs_newline
 
 
 def write_jsonl(
@@ -106,14 +144,15 @@ def write_jsonl(
     output_path: Path,
     quarantine_path: Path = Path("data/quarantine/invalid_events.jsonl"),
 ) -> int:
-    """Write valid events, append rejected records with reasons, return accepted count."""
+    """Append new valid IDs, quarantine invalid records, return newly accepted count."""
     if output_path.resolve() == quarantine_path.resolve():
         raise ValueError("output and quarantine paths must differ")
 
+    seen, needs_newline = _read_accepted_ids(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     quarantine_path.parent.mkdir(parents=True, exist_ok=True)
-    written = rejected = 0
-    with output_path.open("w", encoding="utf-8") as output_file, quarantine_path.open("a", encoding="utf-8") as quarantine_file:
+    written = rejected = duplicates = 0
+    with output_path.open("a", encoding="utf-8") as output_file, quarantine_path.open("a", encoding="utf-8") as quarantine_file:
         for event in events:
             record = asdict(event) if isinstance(event, AssessmentEvent) else dict(event)
             reasons = validate_record(record)
@@ -124,11 +163,24 @@ def write_jsonl(
                     "event_id": record.get("event_id"), "status": "rejected", "reason": reasons,
                 })
                 continue
+            event_id = record["event_id"]
+            if event_id in seen:
+                duplicates += 1
+                logger.info("Duplicate assessment event skipped", extra={
+                    "event_id": event_id, "status": "duplicate",
+                    "reason": "event_id already accepted; keeping first record",
+                })
+                continue
+            if needs_newline:
+                output_file.write("\n")
+                needs_newline = False
             output_file.write(json.dumps(record, separators=(",", ":")) + "\n")
+            seen.add(event_id)
             written += 1
     logger.info("Assessment batch completed", extra={
         "event_id": None, "status": "completed", "reason": None,
-        "accepted": written, "rejected": rejected, "total": written + rejected,
+        "accepted": written, "rejected": rejected, "duplicates": duplicates,
+        "total": written + rejected + duplicates,
     })
     return written
 
@@ -144,7 +196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             config.output_path,
             config.quarantine_path,
         )
-    except OSError as error:
+    except (OSError, ExistingOutputError) as error:
         logger.error("Assessment batch failed", extra={
             "event_id": None, "status": "failed", "reason": str(error),
         })

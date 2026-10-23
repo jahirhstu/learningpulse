@@ -99,16 +99,31 @@ ingestion not preceding completion, the assessment event type, allowed subjects,
 integer scores, `score >= 0`, `max_score > 0`, and `score <= max_score`.
 It returns all rejection reasons instead of raising for invalid field values.
 
-`write_jsonl()` validates each event before writing. Valid output is replaced on
-each run. Invalid records are appended to quarantine as JSON objects containing
+`write_jsonl()` validates each event before writing. Existing accepted output is
+preserved, and only new valid `event_id` values are appended. The first accepted
+record wins: later valid records with the same exact ID string are skipped, even
+if their other fields differ. This applies within a batch and across sequential
+runs targeting the same output file. Duplicates are logged with
+`status="duplicate"` and a reason; they do not go to quarantine.
+
+Invalid records are appended to quarantine as JSON objects containing
 `record`, `status`, and `reasons`; processing continues with the next event.
 JSON logs go to stderr and include `event_id`, `status`, and `reason`. A final
-summary includes `accepted`, `rejected`, and `total` for the current batch.
+summary includes `accepted`, `rejected`, `duplicates`, and `total` for the current
+batch, where `total = accepted + rejected + duplicates`. The `accepted` count and
+the writer's return value count only newly appended records. Invalid records do
+not reserve an ID, so a later valid record with that ID can still be accepted.
 The quarantine file can contain rejected records from multiple runs.
 
 Invalid configuration stops before generation. Filesystem errors are logged and
 produce exit code 1, since the run cannot safely continue without writable output.
 Batch output is not transactional: a filesystem failure can leave partial files.
+Before writing, the writer validates existing accepted output and loads its IDs
+into an in-memory set. Malformed records or existing duplicate IDs cause the CLI
+to log an error and exit with code 1 without modifying either output file.
+Repair such files explicitly before retrying. This implementation assumes one
+writer at a time; concurrent writes and crash recovery are not supported. Memory
+usage grows with the number of unique accepted IDs in the output file.
 
 ### Verify valid and invalid records
 
@@ -121,6 +136,12 @@ a negative score, a missing learner ID, and an invalid timestamp. It verifies
 three accepted records, three quarantined records with reasons, structured
 failure logs, and continued processing after rejection. Other checks cover 1,000
 valid generated records, boundary scores, malformed fields, and configuration precedence.
+
+Duplicate tests replay the same three-record input twice: the first run accepts
+three records, and the second accepts zero and reports three duplicates. The
+accepted output remains byte-for-byte unchanged with one record per ID. Tests
+also cover overlapping batches, changed payloads with reused IDs, invalid records
+followed by valid records with the same ID, and malformed existing output.
 
 ### Assessment event v1 fields
 
